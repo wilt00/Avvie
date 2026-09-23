@@ -9,7 +9,7 @@
 #include <wchar.h>
 
 #define PATH_CAPACITY 32768
-#define COMMAND_CAPACITY 65536
+#define COMMAND_CAPACITY 32767
 
 static void show_error(const wchar_t *message) {
     MessageBoxW(NULL, message, L"Avvie could not start", MB_OK | MB_ICONERROR);
@@ -64,26 +64,55 @@ static uint64_t path_hash(const wchar_t *path) {
     return hash;
 }
 
-static BOOL file_is_current(const wchar_t *cache_path, const wchar_t *query_path) {
+static BOOL file_is_current(const wchar_t *cache_path, const wchar_t *query_path,
+                            const wchar_t *loader_directory) {
     WIN32_FILE_ATTRIBUTE_DATA cache_data;
     WIN32_FILE_ATTRIBUTE_DATA query_data;
+    WIN32_FILE_ATTRIBUTE_DATA loader_directory_data;
+    WIN32_FIND_DATAW loader_data;
+    wchar_t search_path[PATH_CAPACITY];
+    HANDLE search = INVALID_HANDLE_VALUE;
+    BOOL current = FALSE;
 
     if (!GetFileAttributesExW(cache_path, GetFileExInfoStandard, &cache_data) ||
-        !GetFileAttributesExW(query_path, GetFileExInfoStandard, &query_data)) {
+        !GetFileAttributesExW(query_path, GetFileExInfoStandard, &query_data) ||
+        !GetFileAttributesExW(loader_directory, GetFileExInfoStandard, &loader_directory_data) ||
+        CompareFileTime(&cache_data.ftLastWriteTime, &query_data.ftLastWriteTime) < 0 ||
+        CompareFileTime(&cache_data.ftLastWriteTime,
+                        &loader_directory_data.ftLastWriteTime) < 0 ||
+        FAILED(StringCchPrintfW(search_path, PATH_CAPACITY, L"%s\\*", loader_directory))) {
         return FALSE;
     }
 
-    return CompareFileTime(&cache_data.ftLastWriteTime, &query_data.ftLastWriteTime) >= 0;
+    search = FindFirstFileW(search_path, &loader_data);
+    if (search == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+
+    do {
+        if (!(loader_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            CompareFileTime(&cache_data.ftLastWriteTime, &loader_data.ftLastWriteTime) < 0) {
+            goto cleanup;
+        }
+    } while (FindNextFileW(search, &loader_data));
+
+    current = GetLastError() == ERROR_NO_MORE_FILES;
+
+cleanup:
+    FindClose(search);
+    return current;
 }
 
 static BOOL generate_pixbuf_cache(const wchar_t *root, wchar_t *cache_path, size_t cache_capacity) {
     wchar_t local_data[PATH_CAPACITY];
     wchar_t cache_directory[PATH_CAPACITY];
     wchar_t query_path[PATH_CAPACITY];
+    wchar_t loader_directory[PATH_CAPACITY];
     wchar_t command_line[PATH_CAPACITY + 4];
     DWORD local_data_length;
     HANDLE output = INVALID_HANDLE_VALUE;
     HANDLE input = INVALID_HANDLE_VALUE;
+    HANDLE error_output = INVALID_HANDLE_VALUE;
     SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
     STARTUPINFOW startup = {0};
     PROCESS_INFORMATION process = {0};
@@ -108,11 +137,13 @@ static BOOL generate_pixbuf_cache(const wchar_t *root, wchar_t *cache_path, size
     }
     if (FAILED(StringCchPrintfW(cache_path, cache_capacity, L"%s\\gdk-pixbuf-loaders-%016llx.cache",
                                 cache_directory, (unsigned long long)path_hash(root))) ||
-        !join_path(query_path, PATH_CAPACITY, root, L"runtime\\bin\\gdk-pixbuf-query-loaders.exe")) {
+        !join_path(query_path, PATH_CAPACITY, root, L"runtime\\bin\\gdk-pixbuf-query-loaders.exe") ||
+        !join_path(loader_directory, PATH_CAPACITY, root,
+                   L"runtime\\lib\\gdk-pixbuf-2.0\\2.10.0\\loaders")) {
         return FALSE;
     }
 
-    if (file_is_current(cache_path, query_path)) {
+    if (file_is_current(cache_path, query_path, loader_directory)) {
         return SetEnvironmentVariableW(L"GDK_PIXBUF_MODULE_FILE", cache_path);
     }
 
@@ -120,7 +151,10 @@ static BOOL generate_pixbuf_cache(const wchar_t *root, wchar_t *cache_path, size
                          FILE_ATTRIBUTE_NORMAL, NULL);
     input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security,
                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    error_output = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (output == INVALID_HANDLE_VALUE || input == INVALID_HANDLE_VALUE ||
+        error_output == INVALID_HANDLE_VALUE ||
         FAILED(StringCchPrintfW(command_line, PATH_CAPACITY + 4, L"\"%s\"", query_path))) {
         goto cleanup;
     }
@@ -129,7 +163,7 @@ static BOOL generate_pixbuf_cache(const wchar_t *root, wchar_t *cache_path, size
     startup.dwFlags = STARTF_USESTDHANDLES;
     startup.hStdInput = input;
     startup.hStdOutput = output;
-    startup.hStdError = output;
+    startup.hStdError = error_output;
 
     if (!CreateProcessW(query_path, command_line, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, root,
                         &startup, &process)) {
@@ -142,6 +176,9 @@ static BOOL generate_pixbuf_cache(const wchar_t *root, wchar_t *cache_path, size
     CloseHandle(process.hProcess);
 
 cleanup:
+    if (error_output != INVALID_HANDLE_VALUE) {
+        CloseHandle(error_output);
+    }
     if (input != INVALID_HANDLE_VALUE) {
         CloseHandle(input);
     }
