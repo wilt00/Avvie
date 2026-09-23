@@ -18,14 +18,15 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
+import os
+import sys
+
 import gi
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Gdk, Gio, Adw, GLib, GdkPixbuf, Graphene, Gsk, Pango
-import os
-import sys
 import math
 import subprocess
 import piexif
@@ -71,6 +72,51 @@ if not os.path.isdir(resource_folder):
 
 # Is this defined somewhere in Gtk?
 TARGET_TYPE_URI_LIST = 80
+
+
+def get_windows_fractional_ui_scale():
+    """Return the part of Windows' DPI scale not handled by GTK/Win32."""
+    if sys.platform != "win32":
+        return 1.0
+
+    try:
+        import ctypes
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+    except (AttributeError, OSError):
+        return 1.0
+
+    integer_scale = max(1, dpi // 96)
+    return max(1.0, dpi / (96.0 * integer_scale))
+
+
+class FractionalScaleBin(Gtk.Widget):
+    """Scale one widget while preserving GTK's DPI-aware rendering."""
+    def __init__(self, child, scale):
+        super().__init__()
+        self.child = child
+        self.scale = scale
+        child.set_parent(self)
+
+    def do_measure(self, orientation, for_size):
+        child_for_size = -1
+        if for_size >= 0:
+            child_for_size = math.floor(for_size / self.scale)
+
+        minimum, natural, minimum_baseline, natural_baseline = \
+            self.child.measure(orientation, child_for_size)
+
+        def scaled(value):
+            return -1 if value < 0 else math.ceil(value * self.scale)
+
+        return (scaled(minimum), scaled(natural),
+                scaled(minimum_baseline), scaled(natural_baseline))
+
+    def do_size_allocate(self, width, height, baseline):
+        transform = Gsk.Transform.new().scale(self.scale, self.scale)
+        child_baseline = -1 if baseline < 0 else round(baseline / self.scale)
+        self.child.allocate(math.ceil(width / self.scale),
+                            math.ceil(height / self.scale),
+                            child_baseline, transform)
 
 
 # Add open file action to notification
@@ -876,7 +922,8 @@ class SettingsDialog(Adw.PreferencesWindow):
     def __init__(self, parent, avvie):
         Adw.PreferencesWindow.__init__(self)
 
-        self.set_default_size(500, 550)
+        self.set_default_size(round(500 * avvie.ui_scale),
+                              round(550 * avvie.ui_scale))
         self.set_search_enabled(False)
         self.avvie = avvie
 
@@ -1188,6 +1235,7 @@ class Avvie:
         self.running = True
 
         self.win = Adw.ApplicationWindow(application=app)
+        self.ui_scale = get_windows_fractional_ui_scale()
         self.tb = Adw.ToolbarView()
         self.dw = CustomDraw(self)
 
@@ -1228,8 +1276,10 @@ class Avvie:
         self.open_dialog.set_default_filter(f)
 
         self.win.set_title(app_title)
-        self.win.set_default_size(1100, 700)
-        self.win.set_size_request(500, 350)
+        self.win.set_default_size(round(1100 * self.ui_scale),
+                                  round(700 * self.ui_scale))
+        self.win.set_size_request(round(500 * self.ui_scale),
+                                  round(350 * self.ui_scale))
 
         evk = Gtk.GestureClick.new()
         evk.connect("pressed", self.click)
@@ -1263,10 +1313,25 @@ class Avvie:
         self.tl_cursor = Gdk.Cursor.new_from_name("nw-resize")
 
 
-        # Header bar
+        # Header bar. GTK/Win32 uses integer widget scales, so apply only the
+        # remaining fractional Windows scale here. Counter-scale inherited text
+        # because GTK already renders it at the system DPI.
         hb = Adw.HeaderBar()
-
-        self.tb.add_top_bar(hb)
+        if self.ui_scale > 1.0:
+            hb.add_css_class("windows-fractional-ui")
+            scale_css = Gtk.CssProvider.new()
+            scale_css.load_from_data(
+                ".windows-fractional-ui { font-size: "
+                f"{100.0 / self.ui_scale:.4f}%; }}"
+            )
+            self.sc.add_provider_for_display(
+                self.win.get_display(), scale_css,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+            self.windows_scale_css = scale_css
+            self.tb.add_top_bar(FractionalScaleBin(hb, self.ui_scale))
+        else:
+            self.tb.add_top_bar(hb)
         self.win.set_content(self.tb)
         self.tb.set_content(self.dw)
 
