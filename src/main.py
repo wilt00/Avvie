@@ -124,7 +124,10 @@ class FractionalScaleBin(Gtk.Widget):
 
 # Add open file action to notification
 def open_encode_out(action, param):
-    subprocess.call(["xdg-open", picture.last_saved_location])
+    if sys.platform == "win32":
+        os.startfile(picture.last_saved_location)
+    else:
+        subprocess.call(["xdg-open", picture.last_saved_location])
 
 def point_in_rect(rx, ry, rw, rh, px, py):
     return ry < py < ry + rh and rx < px < rx + rw
