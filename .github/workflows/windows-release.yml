@@ -90,6 +90,7 @@ jobs:
           cp src/res/* "$stage/app/avvie/res/"
           cp packaging/windows/launch.py "$stage/app/"
           cp packaging/windows/Avvie.cmd LICENSE README.md "$stage/"
+          cp packaging/windows/Avvie.ico "$stage/"
 
           python -m pip install \
             --disable-pip-version-check \
@@ -106,12 +107,63 @@ jobs:
               -o "$stage/app/locale/$language/LC_MESSAGES/avvie.mo"
           done < po/LINGUAS
 
+          # Include the same precompiled application modules as earlier releases.
+          python -m py_compile "$stage/app/launch.py" "$stage/app/avvie/main.py"
+
           cat > "$stage/BUILD.txt" <<EOF
           Avvie $RELEASE_VERSION
           Source commit: $GITHUB_SHA
           Architecture: x86_64
           Runtime: MSYS2 UCRT64
           EOF
+
+      - name: Build the windowless launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $PWD 'dist\Avvie'
+          $source = Join-Path $PWD 'packaging\windows'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or !$vs) { throw 'MSVC C++ tools not installed' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $resource = Join-Path $env:RUNNER_TEMP 'Avvie.res'
+          $rc = Join-Path $source 'Avvie.rc'
+          $c = Join-Path $source 'launcher.c'
+          $exe = Join-Path $stage 'Avvie.exe'
+          $command = "call `"$vcvars`" >nul && rc /nologo /i `"$stage`" /fo `"$resource`" `"$rc`" && cl /nologo /W4 /WX /O2 /MT `"$c`" `"$resource`" shell32.lib user32.lib /link /SUBSYSTEM:WINDOWS /OUT:`"$exe`""
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & $env:ComSpec /d /c $command
+            if ($LASTEXITCODE -ne 0) { throw 'Native launcher build failed' }
+          } finally {
+            Pop-Location
+          }
+          if (!(Test-Path $exe)) { throw 'Missing Avvie.exe' }
+
+      # Upload the exact archive before any runtime tests, so failed tests still
+      # leave a downloadable artifact for local reproduction. Release remains
+      # gated on the entire build job succeeding.
+      - name: Create archive and checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $PWD $env:ASSET_NAME
+          if (Test-Path $archive) { Remove-Item $archive -Force }
+          & 7z a -tzip -mx=9 $archive '.\dist\Avvie\*'
+          if ($LASTEXITCODE -ne 0) { throw '7-Zip failed to create the archive' }
+          $checksum = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$checksum  $env:ASSET_NAME" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+
+      - name: Upload archive for debugging and release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-release-${{ steps.metadata.outputs.version }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ env.ASSET_NAME }}
+            ${{ env.ASSET_NAME }}.sha256
 
       - name: Test packaged Python modules
         run: |
@@ -142,22 +194,25 @@ jobs:
           jpegtran -version
           test -f "$stage/app/avvie/res/image-crop.svg"
           test -f "$stage/app/avvie/res/pinku.css"
+          test -s "$stage/Avvie.ico"
 
-      - name: Create and test archive
+      - name: Test relocated archive
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $archive = Join-Path $PWD $env:ASSET_NAME
-          if (Test-Path $archive) { Remove-Item $archive -Force }
-
-          & 7z a -tzip -mx=9 $archive '.\dist\Avvie\*'
-          if ($LASTEXITCODE -ne 0) { throw '7-Zip failed to create the archive' }
           & 7z t $archive
           if ($LASTEXITCODE -ne 0) { throw '7-Zip archive test failed' }
-
           $smokeRoot = Join-Path $env:RUNNER_TEMP 'Avvie portable smoke test'
           if (Test-Path $smokeRoot) { Remove-Item $smokeRoot -Recurse -Force }
           Expand-Archive -Path $archive -DestinationPath $smokeRoot
+          if (!(Test-Path (Join-Path $smokeRoot 'Avvie.ico'))) { throw 'Missing Start Menu icon' }
+          $launcher = Join-Path $smokeRoot 'Avvie.exe'
+          if (!(Test-Path $launcher)) { throw 'Missing native launcher' }
+          # PE subsystem 2 is Windows GUI, not console (3).
+          $bytes = [IO.File]::ReadAllBytes($launcher)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt16($bytes, $pe + 0x5c) -ne 2) { throw 'Launcher is not a GUI executable' }
 
           $runtime = Join-Path $smokeRoot 'runtime'
           $env:Path = "$(Join-Path $runtime 'bin');$env:Path"
@@ -172,22 +227,11 @@ jobs:
           try {
             & (Join-Path $runtime 'bin\python.exe') -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import piexif; from PIL import Image; print('relocated runtime OK')"
             if ($LASTEXITCODE -ne 0) { throw 'Relocated runtime smoke test failed' }
+            $test = Start-Process -FilePath $launcher -ArgumentList '--launcher-smoke-test' -Wait -PassThru
+            if ($test.ExitCode -ne 0) { throw "Relocated launcher failed with exit code $($test.ExitCode)" }
           } finally {
             Pop-Location
           }
-
-          $checksum = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          "$checksum  $env:ASSET_NAME" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
-
-      - name: Upload release files
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: windows-release-${{ steps.metadata.outputs.version }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            ${{ env.ASSET_NAME }}
-            ${{ env.ASSET_NAME }}.sha256
 
   release:
     name: Publish GitHub release
@@ -225,7 +269,7 @@ jobs:
 
           Source commit: \`$RELEASE_SHA\`
 
-          Extract the archive and run \`Avvie.cmd\`.
+          Extract the archive and run \`Avvie.exe\` (no terminal window).
           EOF
 
           gh release create "$tag" \
