@@ -197,6 +197,11 @@ class CustomDraw(Gtk.Widget):
         s.append_layout(self.pango, self.colour)
         s.restore()
 
+    def text_above(self, text, x, top, s, gap=2):
+        self.pango.set_text(text)
+        height = self.pango.get_pixel_size()[1]
+        self.text(text, x, top - height - gap, s)
+
     def do_snapshot(self, s):
 
         w = self.get_allocated_width()
@@ -299,7 +304,8 @@ class CustomDraw(Gtk.Widget):
                         if picture.rec_w / picture.crop_ratio[0] * picture.crop_ratio[1] == picture.rec_h:
                             self.set_color(0.9, 0.9, 0.4, 1)
 
-                    self.text(f"{picture.rec_w} x {picture.rec_h}", x + rx, y + ry - 16, s)
+                    self.text_above(f"{picture.rec_w} x {picture.rec_h}",
+                                    x + rx, y + ry, s)
 
                 w = self.get_allocated_width()
                 h = self.get_allocated_height()
@@ -343,17 +349,20 @@ class CustomDraw(Gtk.Widget):
 
                         if picture.trimmed_size and i == 0:
                             self.set_color(0.6, 1, 0.6, 0.8)
-                            self.text(f"Lossless {picture.trimmed_size[0]} x {picture.trimmed_size[1]}", right - size, bottom - (size + 17), s)
+                            self.text_above(
+                                f"Lossless {picture.trimmed_size[0]} x {picture.trimmed_size[1]}",
+                                right - size, bottom - size, s)
 
                         elif i == 0:
                             self.set_color(0.6, 0.6, 0.6, 0.6)
                             if light_theme:
                                 self.set_color(0.4, 0.4, 0.4, 1)
-                            self.text(f"{ex_w} x {ex_h}", right - size, bottom - (size + 17), s)
+                            self.text_above(f"{ex_w} x {ex_h}", right - size,
+                                            bottom - size, s)
 
                         if i == 0 and picture.exif and not picture.discard_exif and picture.png is False:
                             self.set_color(0.4, 0.6, 0.3, 1)
-                            self.text(f"EXIF", right - 32, bottom - (size + 17), s)
+                            self.text_above("EXIF", right - 32, bottom - size, s)
 
                         right -= size + 16
 
