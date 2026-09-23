@@ -1,6 +1,8 @@
 name: Windows release
 
 on:
+  push:
+    branches: [ personal ]  
   workflow_dispatch:
 
 permissions:
