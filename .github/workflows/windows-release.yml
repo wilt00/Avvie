@@ -138,7 +138,7 @@ jobs:
           $rc = Join-Path $source 'Avvie.rc'
           $c = Join-Path $source 'launcher.c'
           $exe = Join-Path $stage 'Avvie.exe'
-          $command = "call `"$vcvars`" >nul && rc /nologo /i `"$stage`" /fo `"$resource`" `"$rc`" && cl /nologo /W4 /WX /O2 /MT `"$c`" `"$resource`" shell32.lib user32.lib /link /SUBSYSTEM:WINDOWS /OUT:`"$exe`""
+          $command = "call `"$vcvars`" >nul && rc /nologo /i `"$stage`" /fo `"$resource`" `"$rc`" && cl /nologo /W4 /WX /O2 /MT `"$c`" `"$resource`" ole32.lib shell32.lib user32.lib /link /SUBSYSTEM:WINDOWS /OUT:`"$exe`""
           Push-Location $env:RUNNER_TEMP
           try {
             & $env:ComSpec /d /c $command
@@ -212,7 +212,7 @@ jobs:
           $archive = Join-Path $PWD $env:ASSET_NAME
           & 7z t $archive
           if ($LASTEXITCODE -ne 0) { throw '7-Zip archive test failed' }
-          $smokeRoot = Join-Path $env:RUNNER_TEMP 'Avvie portable smoke test'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'Avvie relocatable smoke test'
           if (Test-Path $smokeRoot) { Remove-Item $smokeRoot -Recurse -Force }
           Expand-Archive -Path $archive -DestinationPath $smokeRoot
           if (!(Test-Path (Join-Path $smokeRoot 'Avvie.ico'))) { throw 'Missing Start Menu icon' }
@@ -232,12 +232,23 @@ jobs:
           $env:XDG_DATA_DIRS = Join-Path $runtime 'share'
           $env:GSETTINGS_SCHEMA_DIR = Join-Path $runtime 'share\glib-2.0\schemas'
 
+          $configHome = Join-Path $env:RUNNER_TEMP 'Avvie config smoke test'
+          if (Test-Path $configHome) { Remove-Item $configHome -Recurse -Force }
+          $env:XDG_CONFIG_HOME = $configHome
+
           Push-Location $env:RUNNER_TEMP
           try {
             & (Join-Path $runtime 'bin\python.exe') -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw; import piexif; from PIL import Image; print('relocated runtime OK')"
             if ($LASTEXITCODE -ne 0) { throw 'Relocated runtime smoke test failed' }
             $test = Start-Process -FilePath $launcher -ArgumentList '--launcher-smoke-test' -Wait -PassThru
             if ($test.ExitCode -ne 0) { throw "Relocated launcher failed with exit code $($test.ExitCode)" }
+
+            $appData = Join-Path $configHome 'com.github.taiko2k.avvie'
+            $cacheFiles = @(Get-ChildItem (Join-Path $appData 'Cache') -Filter 'gdk-pixbuf-loaders-*.cache')
+            if ($cacheFiles.Count -ne 1) { throw 'Launcher did not create exactly one pixbuf cache' }
+            if (Test-Path (Join-Path $appData 'Logs\launcher.log')) {
+              throw 'Launcher retained the log after a successful run'
+            }
           } finally {
             Pop-Location
           }

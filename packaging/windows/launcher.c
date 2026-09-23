@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <strsafe.h>
 
 #include <stdint.h>
@@ -10,6 +11,7 @@
 
 #define PATH_CAPACITY 32768
 #define COMMAND_CAPACITY 32767
+#define APP_ID L"com.github.taiko2k.avvie"
 
 static void show_error(const wchar_t *message) {
     MessageBoxW(NULL, message, L"Avvie could not start", MB_OK | MB_ICONERROR);
@@ -17,6 +19,42 @@ static void show_error(const wchar_t *message) {
 
 static BOOL join_path(wchar_t *output, size_t capacity, const wchar_t *root, const wchar_t *suffix) {
     return SUCCEEDED(StringCchPrintfW(output, capacity, L"%s%s", root, suffix));
+}
+
+static BOOL ensure_directory(const wchar_t *path) {
+    int result = SHCreateDirectoryExW(NULL, path, NULL);
+    return result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS || result == ERROR_FILE_EXISTS;
+}
+
+static BOOL get_application_data_directory(wchar_t *output, size_t capacity) {
+    wchar_t config_home[PATH_CAPACITY];
+    PWSTR local_data = NULL;
+    DWORD config_home_length =
+        GetEnvironmentVariableW(L"XDG_CONFIG_HOME", config_home, PATH_CAPACITY);
+    BOOL success = FALSE;
+
+    if (config_home_length >= PATH_CAPACITY) {
+        return FALSE;
+    }
+    if (config_home_length == 0) {
+        if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, NULL,
+                                        &local_data))) {
+            return FALSE;
+        }
+        if (FAILED(StringCchCopyW(config_home, PATH_CAPACITY, local_data))) {
+            goto cleanup;
+        }
+    }
+
+    if (FAILED(StringCchPrintfW(output, capacity, L"%s\\" APP_ID, config_home)) ||
+        !ensure_directory(output)) {
+        goto cleanup;
+    }
+    success = TRUE;
+
+cleanup:
+    CoTaskMemFree(local_data);
+    return success;
 }
 
 static BOOL set_path_environment(const wchar_t *root) {
@@ -103,13 +141,11 @@ cleanup:
     return current;
 }
 
-static BOOL generate_pixbuf_cache(const wchar_t *root, wchar_t *cache_path, size_t cache_capacity) {
-    wchar_t local_data[PATH_CAPACITY];
-    wchar_t cache_directory[PATH_CAPACITY];
+static BOOL generate_pixbuf_cache(const wchar_t *root, const wchar_t *cache_directory,
+                                  wchar_t *cache_path, size_t cache_capacity) {
     wchar_t query_path[PATH_CAPACITY];
     wchar_t loader_directory[PATH_CAPACITY];
     wchar_t command_line[PATH_CAPACITY + 4];
-    DWORD local_data_length;
     HANDLE output = INVALID_HANDLE_VALUE;
     HANDLE input = INVALID_HANDLE_VALUE;
     HANDLE error_output = INVALID_HANDLE_VALUE;
@@ -118,23 +154,6 @@ static BOOL generate_pixbuf_cache(const wchar_t *root, wchar_t *cache_path, size
     PROCESS_INFORMATION process = {0};
     DWORD exit_code = 1;
 
-    local_data_length = GetEnvironmentVariableW(L"LOCALAPPDATA", local_data, PATH_CAPACITY);
-    if (local_data_length == 0 || local_data_length >= PATH_CAPACITY) {
-        local_data_length = GetTempPathW(PATH_CAPACITY, local_data);
-        if (local_data_length == 0 || local_data_length >= PATH_CAPACITY) {
-            return FALSE;
-        }
-        if (local_data[local_data_length - 1] == L'\\') {
-            local_data[local_data_length - 1] = L'\0';
-        }
-    }
-
-    if (FAILED(StringCchPrintfW(cache_directory, PATH_CAPACITY, L"%s\\Avvie", local_data))) {
-        return FALSE;
-    }
-    if (!CreateDirectoryW(cache_directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        return FALSE;
-    }
     if (FAILED(StringCchPrintfW(cache_path, cache_capacity, L"%s\\gdk-pixbuf-loaders-%016llx.cache",
                                 cache_directory, (unsigned long long)path_hash(root))) ||
         !join_path(query_path, PATH_CAPACITY, root, L"runtime\\bin\\gdk-pixbuf-query-loaders.exe") ||
@@ -251,14 +270,13 @@ static BOOL append_quoted_argument(wchar_t *command, size_t capacity, size_t *le
     return append_character(command, capacity, length, L'\"');
 }
 
-static int run_avvie(const wchar_t *root, int argument_count, wchar_t **arguments) {
+static int run_avvie(const wchar_t *root, const wchar_t *log_directory, int argument_count,
+                     wchar_t **arguments) {
     wchar_t python_path[PATH_CAPACITY];
     wchar_t launch_path[PATH_CAPACITY];
     wchar_t log_path[PATH_CAPACITY];
-    wchar_t local_data[PATH_CAPACITY];
     wchar_t command_line[COMMAND_CAPACITY] = L"";
     size_t command_length = 0;
-    DWORD local_data_length;
     HANDLE log = INVALID_HANDLE_VALUE;
     HANDLE input = INVALID_HANDLE_VALUE;
     SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
@@ -296,9 +314,7 @@ static int run_avvie(const wchar_t *root, int argument_count, wchar_t **argument
         }
     }
 
-    local_data_length = GetEnvironmentVariableW(L"LOCALAPPDATA", local_data, PATH_CAPACITY);
-    if (local_data_length == 0 || local_data_length >= PATH_CAPACITY ||
-        FAILED(StringCchPrintfW(log_path, PATH_CAPACITY, L"%s\\Avvie\\avvie.log", local_data))) {
+    if (FAILED(StringCchPrintfW(log_path, PATH_CAPACITY, L"%s\\launcher.log", log_directory))) {
         return 1;
     }
 
@@ -333,7 +349,9 @@ cleanup:
     if (log != INVALID_HANDLE_VALUE) {
         CloseHandle(log);
     }
-    if (exit_code != 0 && !smoke_test) {
+    if (exit_code == 0) {
+        DeleteFileW(log_path);
+    } else if (!smoke_test) {
         wchar_t message[PATH_CAPACITY];
         if (SUCCEEDED(StringCchPrintfW(message, PATH_CAPACITY,
                                       L"Avvie exited with code %lu. Details are in:\n%s",
@@ -346,6 +364,9 @@ cleanup:
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR command_line, int show_command) {
     wchar_t executable_path[PATH_CAPACITY];
+    wchar_t application_data_directory[PATH_CAPACITY];
+    wchar_t cache_directory[PATH_CAPACITY];
+    wchar_t log_directory[PATH_CAPACITY];
     wchar_t cache_path[PATH_CAPACITY];
     wchar_t *separator;
     wchar_t **arguments;
@@ -373,7 +394,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
         show_error(L"Could not configure the bundled runtime.");
         return 1;
     }
-    if (!generate_pixbuf_cache(executable_path, cache_path, PATH_CAPACITY)) {
+    if (!get_application_data_directory(application_data_directory, PATH_CAPACITY) ||
+        FAILED(StringCchPrintfW(cache_directory, PATH_CAPACITY, L"%s\\Cache",
+                                application_data_directory)) ||
+        FAILED(StringCchPrintfW(log_directory, PATH_CAPACITY, L"%s\\Logs",
+                                application_data_directory)) ||
+        !ensure_directory(cache_directory) || !ensure_directory(log_directory)) {
+        show_error(L"Could not initialize the application data directories.");
+        return 1;
+    }
+    if (!generate_pixbuf_cache(executable_path, cache_directory, cache_path, PATH_CAPACITY)) {
         show_error(L"Could not initialize the bundled image loaders.");
         return 1;
     }
@@ -383,7 +413,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
         show_error(L"Could not parse the command line.");
         return 1;
     }
-    exit_code = run_avvie(executable_path, argument_count, arguments);
+    exit_code = run_avvie(executable_path, log_directory, argument_count, arguments);
     LocalFree(arguments);
     return exit_code;
 }
