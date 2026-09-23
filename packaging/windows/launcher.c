@@ -23,25 +23,13 @@ static BOOL set_path_environment(const wchar_t *root) {
     wchar_t runtime[PATH_CAPACITY];
     wchar_t runtime_bin[PATH_CAPACITY];
     wchar_t value[PATH_CAPACITY];
-    DWORD old_path_length;
-    wchar_t *old_path = NULL;
-    BOOL success = FALSE;
 
     if (!join_path(runtime, PATH_CAPACITY, root, L"runtime") ||
         !join_path(runtime_bin, PATH_CAPACITY, root, L"runtime\\bin")) {
         return FALSE;
     }
 
-    old_path_length = GetEnvironmentVariableW(L"PATH", NULL, 0);
-    if (old_path_length > 0) {
-        old_path = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, old_path_length * sizeof(wchar_t));
-        if (old_path == NULL || GetEnvironmentVariableW(L"PATH", old_path, old_path_length) == 0) {
-            goto cleanup;
-        }
-    }
-
-    if (FAILED(StringCchPrintfW(value, PATH_CAPACITY, L"%s;%s", runtime_bin, old_path ? old_path : L"")) ||
-        !SetEnvironmentVariableW(L"PATH", value) ||
+    if (!SetEnvironmentVariableW(L"PATH", runtime_bin) ||
         !SetEnvironmentVariableW(L"PYTHONHOME", runtime) ||
         !join_path(value, PATH_CAPACITY, root, L"app") ||
         !SetEnvironmentVariableW(L"PYTHONPATH", value) ||
@@ -57,16 +45,10 @@ static BOOL set_path_environment(const wchar_t *root) {
         !join_path(value, PATH_CAPACITY, root, L"runtime\\lib\\gdk-pixbuf-2.0\\2.10.0\\loaders") ||
         !SetEnvironmentVariableW(L"GDK_PIXBUF_MODULEDIR", value) ||
         !SetEnvironmentVariableW(L"PYTHONUNBUFFERED", L"1")) {
-        goto cleanup;
+        return FALSE;
     }
 
-    success = TRUE;
-
-cleanup:
-    if (old_path != NULL) {
-        HeapFree(GetProcessHeap(), 0, old_path);
-    }
-    return success;
+    return TRUE;
 }
 
 static uint64_t path_hash(const wchar_t *path) {
@@ -260,6 +242,7 @@ static int run_avvie(const wchar_t *root, int argument_count, wchar_t **argument
         const wchar_t *test_code =
             L"import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); "
             L"from gi.repository import Gtk, Adw; import piexif; from PIL import Image; "
+            L"import shutil; assert shutil.which('jpegtran'), 'bundled jpegtran not found'; "
             L"print('native launcher smoke test OK')";
         if (!append_quoted_argument(command_line, COMMAND_CAPACITY, &command_length, L"-c") ||
             !append_quoted_argument(command_line, COMMAND_CAPACITY, &command_length, test_code)) {

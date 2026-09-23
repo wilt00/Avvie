@@ -3,7 +3,7 @@ setlocal
 set "ROOT=%~dp0"
 set "RUNTIME=%ROOT%runtime"
 
-set "PATH=%RUNTIME%\bin;%PATH%"
+set "PATH=%RUNTIME%\bin"
 set "PYTHONHOME=%RUNTIME%"
 set "PYTHONPATH=%ROOT%app"
 set "PYGI_DLL_PATH=%RUNTIME%\bin"
