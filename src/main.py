@@ -32,6 +32,7 @@ import subprocess
 import piexif
 import json
 import shutil
+import tempfile
 from PIL import Image, ImageFilter, ImageChops, ImageDraw
 
 jpt = shutil.which("jpegtran")
@@ -745,45 +746,56 @@ class Picture:
         self.rec_w = round(w / self.scale_factor)
         self.rec_h = round(h / self.scale_factor)
 
-    def jpegtran_test(self):
-        return config.get("lossless-jpg-crop", False) and jpt and not self.png and self.source_image.format == 'JPEG' and not self.export_constrain
+    def jpegtran_test(self, output_is_png=None):
+        if output_is_png is None:
+            output_is_png = self.png
+        return (config.get("lossless-jpg-crop", False) and jpt and
+                not output_is_png and self.source_image.format == 'JPEG' and
+                not self.export_constrain)
 
     def run_jpegtran(self, filepath):
+        def transform(arguments):
+            handle, output_path = tempfile.mkstemp(
+                suffix=".jpg", dir=os.path.dirname(filepath))
+            os.close(handle)
+            try:
+                subprocess.run(
+                    [jpt, *arguments, "-outfile", output_path, filepath],
+                    check=True)
+                os.replace(output_path, filepath)
+            finally:
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+
         if self.flip_hoz:
-            cmd = f"jpegtran -flip horizontal -copy none -optimize -outfile {filepath} {filepath}"
-            subprocess.run(cmd, shell=True, check=True)
+            transform(["-flip", "horizontal", "-copy", "none", "-optimize"])
         if self.flip_vert:
-            cmd = f"jpegtran -flip vertical -copy none -optimize -outfile {filepath} {filepath}"
-            subprocess.run(cmd, shell=True, check=True)
+            transform(["-flip", "vertical", "-copy", "none", "-optimize"])
         if self.rotation == -90.0:
-            cmd = f"jpegtran -rotate 90 -copy none -outfile {filepath} {filepath}"
-            subprocess.run(cmd, shell=True, check=True)
+            transform(["-rotate", "90", "-copy", "none"])
         if self.rotation == 90.0:
-            cmd = f"jpegtran -rotate 270 -copy none -outfile {filepath} {filepath}"
-            subprocess.run(cmd, shell=True, check=True)
-        g = " -grayscale"
-        cmd = f"jpegtran -crop {self.rec_w}x{self.rec_h}+{self.rec_x}+{self.rec_y} -copy none -optimize {g if self.gray else ''} -outfile {filepath} {filepath}"
-        subprocess.run(cmd, shell=True, check=True)
+            transform(["-rotate", "270", "-copy", "none"])
+
+        crop = f"{self.rec_w}x{self.rec_h}+{self.rec_x}+{self.rec_y}"
+        arguments = ["-crop", crop, "-copy", "none", "-optimize"]
+        if self.gray:
+            arguments.append("-grayscale")
+        transform(arguments)
+
     def run_jpegtran_file(self, in_path, out_path):
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=True) as temp:
-            f = open(in_path, "rb")
-            temp.write(f.read())
-            f.close()
-            self.run_jpegtran(temp.name)
-            f = open(out_path, "wb")
-            temp.seek(0)
-            f.write(temp.read())
+        with tempfile.TemporaryDirectory() as temp_directory:
+            working_path = os.path.join(temp_directory, "working.jpg")
+            shutil.copyfile(in_path, working_path)
+            self.run_jpegtran(working_path)
+            shutil.copyfile(working_path, out_path)
 
     def run_jpegtran_pillow(self, im):
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=True) as temp:
-            im = im.convert("RGB")
-            im.save(temp.name)
-            self.run_jpegtran(temp.name)
-            cr = Image.open(temp.name)
-
-        return cr
+        with tempfile.TemporaryDirectory() as temp_directory:
+            working_path = os.path.join(temp_directory, "working.jpg")
+            im.convert("RGB").save(working_path, "JPEG")
+            self.run_jpegtran(working_path)
+            with Image.open(working_path) as transformed:
+                return transformed.copy()
 
     def export(self, path=None):
 
@@ -805,8 +817,9 @@ class Picture:
 
         print(f"Target folder is: {base_folder}")
 
-        if not os.path.isdir(base_folder):
+        if not base_folder or not os.path.isdir(base_folder):
             self.avvie.app.send_notification("2", self.avvie.error_notification)
+            return False
 
         im = self.source_image
         if not im:
@@ -882,7 +895,7 @@ class Picture:
 
             path = path + extra + ext
 
-        if self.jpegtran_test():
+        if self.jpegtran_test(png):
             print("Using lossless mode!")
             self.run_jpegtran_file(self.loaded_fullpath, path)
 
