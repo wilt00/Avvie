@@ -92,6 +92,13 @@ jobs:
           cp packaging/windows/Avvie.cmd LICENSE README.md "$stage/"
           cp packaging/windows/Avvie.ico "$stage/"
 
+          # GTK owns the actual application window (in pythonw.exe), so it needs
+          # a themed window icon in addition to the icon embedded in Avvie.exe.
+          icon_dir="$stage/runtime/share/icons/hicolor/scalable/apps"
+          mkdir -p "$icon_dir"
+          cp data/icons/hicolor/scalable/apps/com.github.taiko2k.avvie.svg "$icon_dir/"
+          gtk4-update-icon-cache --force "$stage/runtime/share/icons/hicolor"
+
           python -m pip install \
             --disable-pip-version-check \
             --no-compile \
@@ -195,6 +202,8 @@ jobs:
           test -f "$stage/app/avvie/res/image-crop.svg"
           test -f "$stage/app/avvie/res/pinku.css"
           test -s "$stage/Avvie.ico"
+          test -s "$stage/runtime/share/icons/hicolor/scalable/apps/com.github.taiko2k.avvie.svg"
+          gtk4-update-icon-cache --validate "$stage/runtime/share/icons/hicolor"
 
       - name: Test relocated archive
         shell: pwsh

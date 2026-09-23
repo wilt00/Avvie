@@ -44,6 +44,9 @@ app_id = "com.github.taiko2k.avvie"
 version = "2.4"
 default_theme = "default"
 
+# GTK uses this themed icon for the window, including its Windows taskbar icon.
+Gtk.Window.set_default_icon_name(app_id)
+
 # App background colour
 background_color = (0.14, 0.14, 0.14)
 #background_color = (0.9, 0.9, 0.9)
